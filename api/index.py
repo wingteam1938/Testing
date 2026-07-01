@@ -4,8 +4,8 @@ import json
 import uuid
 import urllib.request
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8924673856:AAGTZx5wvWOo5J1y1dwyVlDIfgmeuVyKW6w")
-ADMIN_IDS = os.environ.get("ADMIN_IDS", "8519622120").split(",")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ADMIN_IDS = os.environ.get("ADMIN_IDS", "").split(",")
 BASE_URL = os.environ.get("BASE_URL", "https://testing-git-main-kullayappabusiness-7677s-projects.vercel.app")
 
 active_links = {}
